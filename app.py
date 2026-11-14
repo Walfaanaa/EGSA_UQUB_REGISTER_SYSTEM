@@ -1,67 +1,91 @@
-import re
+
+import base64
 import io
 import json
-import base64
+import re
 import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-import requests
 import pandas as pd
+import requests
 import streamlit as st
 
 
-# =====================================================
-# PAGE CONFIGURATION
-# =====================================================
+# ============================================================
+# 1. PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
     page_title="EGSA Digital Equb",
     page_icon="🤝",
     layout="centered",
-    initial_sidebar_state="collapsed"
 )
 
-st.markdown("""
-<style>
-.main .block-container {
-    max-width: 850px;
-    padding-top: 2rem;
-}
-.hero {
-    padding: 22px;
-    border-radius: 14px;
-    background: rgba(120,120,120,0.10);
-    margin-bottom: 15px;
-}
-.stButton button {
-    border-radius: 9px;
-    min-height: 45px;
-}
-</style>
-""", unsafe_allow_html=True)
+st.title("🤝 EGSA Digital Equb")
+st.subheader("Group 3 – Member Registration")
+
+st.markdown(
+    """
+    Welcome to the EGSA Digital Equb registration platform.
+
+    - **Group capacity:** 10 members
+    - **Monthly contribution:** ETB 10,000 per member
+    - **Registration:** Open until all 10 positions are filled
+    """
+)
+
+st.info(
+    "This application manages member registration only. "
+    "It does not collect, hold, or transfer Equb contributions."
+)
 
 
-# =====================================================
-# APPLICATION CONFIGURATION
-# =====================================================
-
-CAPACITY = 10
+# ============================================================
+# 2. CONFIGURATION
+# ============================================================
 
 CSV_COLUMNS = [
     "member_no",
     "full_name",
     "phone",
     "telegram_username",
-    "registered_at"
+    "registered_at",
 ]
 
+DEFAULT_SETTINGS = {
+    "group_name": "EGSA Digital Equb - Group 3",
+    "capacity": 10,
+    "is_open": True,
+}
 
-# =====================================================
-# GITHUB CONFIGURATION
-# =====================================================
 
-def github_config():
+def get_config():
+    """Read GitHub and admin credentials from Streamlit secrets."""
+
+    required = [
+        "GITHUB_TOKEN",
+        "GITHUB_OWNER",
+        "GITHUB_REPO",
+        "ADMIN_PASSWORD",
+    ]
+
+    missing = [
+        key for key in required
+        if not st.secrets.get(key)
+    ]
+
+    if missing:
+        st.error(
+            "Missing application secrets: "
+            + ", ".join(missing)
+        )
+        st.info(
+            "Configure these values in "
+            "Streamlit Cloud → App settings → Secrets, "
+            "or in .streamlit/secrets.toml for local testing."
+        )
+        st.stop()
 
     return {
         "token": st.secrets["GITHUB_TOKEN"],
@@ -70,84 +94,85 @@ def github_config():
         "branch": st.secrets.get("GITHUB_BRANCH", "main"),
         "csv_path": st.secrets.get(
             "GITHUB_CSV_PATH",
-            "data/equb_members.csv"
+            "data/equb_members.csv",
         ),
         "settings_path": st.secrets.get(
             "GITHUB_SETTINGS_PATH",
-            "data/equb_settings.json"
-        )
+            "data/equb_settings.json",
+        ),
+        "admin_password": st.secrets["ADMIN_PASSWORD"],
     }
 
 
+CONFIG = get_config()
+
+
+# ============================================================
+# 3. GITHUB API FUNCTIONS
+# ============================================================
+
+class GitHubAPIError(Exception):
+    def __init__(self, status_code, message):
+        self.status_code = status_code
+        super().__init__(message)
+
+
 def github_headers():
-
-    config = github_config()
-
     return {
-        "Authorization": f"Bearer {config['token']}",
+        "Authorization": f"Bearer {CONFIG['token']}",
         "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28"
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
 
 def github_url(path):
-
-    config = github_config()
-
     encoded_path = quote(path, safe="/")
 
     return (
         f"https://api.github.com/repos/"
-        f"{config['owner']}/{config['repo']}/contents/"
+        f"{CONFIG['owner']}/{CONFIG['repo']}/contents/"
         f"{encoded_path}"
     )
 
 
-# =====================================================
-# READ FILE FROM GITHUB
-# =====================================================
-
 def github_read_file(path):
+    """Read a file from the configured GitHub branch."""
 
     response = requests.get(
         github_url(path),
         headers=github_headers(),
-        params={
-            "ref": github_config()["branch"]
-        },
-        timeout=20
+        params={"ref": CONFIG["branch"]},
+        timeout=20,
     )
 
     if response.status_code == 404:
         return None, None
 
-    response.raise_for_status()
+    if response.status_code != 200:
+        raise GitHubAPIError(
+            response.status_code,
+            response.text,
+        )
 
-    file_data = response.json()
-
+    result = response.json()
     content = base64.b64decode(
-        file_data["content"]
-    )
+        result["content"]
+    ).decode("utf-8")
 
-    return content, file_data["sha"]
+    return content, result["sha"]
 
-
-# =====================================================
-# SAVE OR UPDATE FILE ON GITHUB
-# =====================================================
 
 def github_write_file(path, content, sha=None):
+    """Create or update a file in GitHub."""
 
-    config = github_config()
+    encoded_content = base64.b64encode(
+        content.encode("utf-8")
+    ).decode("utf-8")
 
     payload = {
-        "message": (
-            "EGSA Digital Equb: Update registration records"
-        ),
-        "content": base64.b64encode(
-            content.encode("utf-8")
-        ).decode("utf-8"),
-        "branch": config["branch"]
+        "message": f"Update {path} - EGSA Digital Equb",
+        "content": encoded_content,
+        "branch": CONFIG["branch"],
     }
 
     if sha:
@@ -157,726 +182,557 @@ def github_write_file(path, content, sha=None):
         github_url(path),
         headers=github_headers(),
         json=payload,
-        timeout=30
+        timeout=30,
     )
 
-    response.raise_for_status()
+    if response.status_code not in (200, 201):
+        raise GitHubAPIError(
+            response.status_code,
+            response.text,
+        )
 
     return response.json()
 
 
-# =====================================================
-# GROUP SETTINGS
-# =====================================================
+# ============================================================
+# 4. GROUP SETTINGS
+# ============================================================
 
-def get_group():
-
-    path = github_config()["settings_path"]
-
-    content, _ = github_read_file(path)
-
-    if content is None:
-
-        return {
-            "group_name": "EGSA Digital Equb - Group 3",
-            "capacity": CAPACITY,
-            "is_open": True
-        }
-
-    settings = json.loads(
-        content.decode("utf-8")
+def get_group_settings():
+    content, sha = github_read_file(
+        CONFIG["settings_path"]
     )
 
-    return {
-        "group_name": settings.get(
-            "group_name",
-            "EGSA Digital Equb - Group 3"
-        ),
-        "capacity": CAPACITY,
-        "is_open": settings.get(
-            "is_open",
-            True
-        )
-    }
+    if not content:
+        return DEFAULT_SETTINGS.copy(), sha
+
+    settings = DEFAULT_SETTINGS.copy()
+    settings.update(json.loads(content))
+
+    # Keep the capacity fixed at 10 for this group.
+    settings["capacity"] = 10
+
+    return settings, sha
 
 
-def update_group_status(is_open):
-
-    path = github_config()["settings_path"]
+def save_group_settings(new_settings):
+    """Update group settings, retrying GitHub conflicts."""
 
     for attempt in range(5):
-
-        content, sha = github_read_file(path)
-
-        if content is None:
-
-            settings = {
-                "group_name": "EGSA Digital Equb - Group 3",
-                "capacity": CAPACITY,
-                "is_open": is_open
-            }
-
-        else:
-
-            settings = json.loads(
-                content.decode("utf-8")
-            )
-
-            settings["is_open"] = is_open
-            settings["capacity"] = CAPACITY
+        _, sha = github_read_file(
+            CONFIG["settings_path"]
+        )
 
         try:
-
             github_write_file(
-                path,
+                CONFIG["settings_path"],
                 json.dumps(
-                    settings,
-                    indent=4
+                    new_settings,
+                    indent=4,
+                    ensure_ascii=False,
                 ),
-                sha
+                sha,
             )
-
             return True
 
-        except requests.HTTPError as error:
-
-            if (
-                error.response is not None
-                and error.response.status_code == 409
-                and attempt < 4
-            ):
-
-                time.sleep(0.5 * (attempt + 1))
+        except GitHubAPIError as error:
+            if error.status_code in (409, 422):
+                time.sleep(1)
                 continue
-
             raise
 
     raise RuntimeError(
-        "Unable to update registration settings."
+        "Could not update group settings after 5 attempts."
     )
 
 
-# =====================================================
-# LOAD MEMBERS FROM GITHUB CSV
-# =====================================================
+# ============================================================
+# 5. MEMBER DATA
+# ============================================================
 
 def get_members():
-
-    path = github_config()["csv_path"]
-
-    content, _ = github_read_file(path)
-
-    if content is None:
-        return []
-
-    df = pd.read_csv(
-        io.BytesIO(content),
-        dtype=str,
-        keep_default_na=False
+    content, _ = github_read_file(
+        CONFIG["csv_path"]
     )
 
-    for column in CSV_COLUMNS:
+    if not content or not content.strip():
+        return pd.DataFrame(columns=CSV_COLUMNS)
 
+    df = pd.read_csv(io.StringIO(content))
+
+    for column in CSV_COLUMNS:
         if column not in df.columns:
             df[column] = ""
 
     df = df[CSV_COLUMNS]
 
-    return df.to_dict("records")
+    return df.fillna("")
 
 
-# =====================================================
-# REGISTER MEMBER DIRECTLY TO GITHUB
-# =====================================================
+def dataframe_to_csv(df):
+    return df[CSV_COLUMNS].to_csv(index=False)
 
-def register_member(name, phone, telegram):
 
-    path = github_config()["csv_path"]
+# ============================================================
+# 6. PHONE NUMBER VALIDATION
+# ============================================================
+
+def normalize_phone(phone):
+    """
+    Convert Ethiopian mobile numbers to a common format.
+
+    Examples:
+    0912345678
+    +251912345678
+    091-234-5678
+    """
+
+    phone = re.sub(r"[\s()\-]", "", str(phone))
+
+    if phone.startswith("+251"):
+        phone = "0" + phone[4:]
+
+    elif phone.startswith("251"):
+        phone = "0" + phone[3:]
+
+    return phone
+
+
+def valid_phone(phone):
+    phone = normalize_phone(phone)
+
+    return bool(
+        re.fullmatch(r"0[97]\d{8}", phone)
+    )
+
+
+# ============================================================
+# 7. MEMBER REGISTRATION
+# ============================================================
+
+def register_member(full_name, phone, telegram_username):
+    """
+    Register one member in GitHub CSV.
+
+    Re-reads the latest CSV before writing and retries
+    common GitHub file conflicts.
+    """
+
+    clean_name = " ".join(full_name.strip().split())
+    clean_phone = normalize_phone(phone)
+
+    if len(clean_name) < 3:
+        return "invalid_name"
+
+    if not valid_phone(clean_phone):
+        return "invalid_phone"
 
     for attempt in range(5):
 
-        # Read latest registration settings
+        settings, _ = get_group_settings()
 
-        group = get_group()
+        current_content, csv_sha = github_read_file(
+            CONFIG["csv_path"]
+        )
 
-        if not group["is_open"]:
-            return {"status": "closed"}
-
-        # Always read the latest CSV from GitHub
-
-        content, sha = github_read_file(path)
-
-        if content is None:
-
-            df = pd.DataFrame(
-                columns=CSV_COLUMNS
-            )
-
-        else:
-
-            df = pd.read_csv(
-                io.BytesIO(content),
-                dtype=str,
-                keep_default_na=False
+        if current_content and current_content.strip():
+            members = pd.read_csv(
+                io.StringIO(current_content)
             )
 
             for column in CSV_COLUMNS:
+                if column not in members.columns:
+                    members[column] = ""
 
-                if column not in df.columns:
-                    df[column] = ""
-
-            df = df[CSV_COLUMNS]
-
-        # Check duplicate phone number
-
-        existing_phones = (
-            df["phone"].astype(str).str.strip()
-        )
-
-        if phone in existing_phones.values:
-
-            return {"status": "duplicate"}
-
-        # Check maximum capacity
-
-        if len(df) >= CAPACITY:
-
-            return {"status": "full"}
-
-        # Assign next member number
-
-        if df.empty:
-
-            member_no = 1
+            members = members[CSV_COLUMNS].fillna("")
 
         else:
+            members = pd.DataFrame(columns=CSV_COLUMNS)
 
-            numbers = pd.to_numeric(
-                df["member_no"],
-                errors="coerce"
-            ).dropna()
+        # Duplicate phone check
+        existing_phones = members["phone"].astype(str).apply(
+            normalize_phone
+        )
 
-            member_no = (
-                int(numbers.max()) + 1
-                if not numbers.empty
-                else 1
-            )
+        if clean_phone in existing_phones.values:
+            return "duplicate"
 
-        if member_no > CAPACITY:
+        # Capacity check
+        capacity = 10
 
-            return {"status": "full"}
+        if len(members) >= capacity:
+            return "full"
 
-        # Create new registration record
+        if not settings.get("is_open", True):
+            return "closed"
+
+        member_no = len(members) + 1
 
         new_member = {
-            "member_no": str(member_no),
-            "full_name": name,
-            "phone": phone,
-            "telegram_username": telegram or "",
+            "member_no": member_no,
+            "full_name": clean_name,
+            "phone": clean_phone,
+            "telegram_username": telegram_username.strip().lstrip("@"),
             "registered_at": datetime.now(
                 timezone.utc
-            ).isoformat()
+            ).strftime("%Y-%m-%d %H:%M:%S UTC"),
         }
 
-        updated_df = pd.concat(
+        updated_members = pd.concat(
             [
-                df,
-                pd.DataFrame([new_member])
+                members,
+                pd.DataFrame([new_member]),
             ],
-            ignore_index=True
+            ignore_index=True,
         )
 
         try:
-
-            # Save directly to GitHub
-
             github_write_file(
-                path,
-                updated_df.to_csv(index=False),
-                sha
+                CONFIG["csv_path"],
+                dataframe_to_csv(updated_members),
+                csv_sha,
             )
 
-            # Close registration when position 10 is filled
-
-            if member_no == CAPACITY:
-
+            # Close registration after the tenth member.
+            if len(updated_members) >= capacity:
                 try:
-                    update_group_status(False)
+                    latest_settings, _ = get_group_settings()
+                    latest_settings["is_open"] = False
+                    save_group_settings(latest_settings)
                 except Exception:
-                    # Capacity check still prevents further registration.
+                    # The CSV capacity check still blocks
+                    # additional registrations.
                     pass
 
-            return {
-                "status": "registered",
-                "member_no": member_no
-            }
+            return "registered"
 
-        except requests.HTTPError as error:
-
-            # Retry if another registration updated
-            # the same CSV file first.
-
-            if (
-                error.response is not None
-                and error.response.status_code == 409
-                and attempt < 4
-            ):
-
-                time.sleep(0.5 * (attempt + 1))
+        except GitHubAPIError as error:
+            if error.status_code in (409, 422):
+                time.sleep(1)
                 continue
-
             raise
 
     raise RuntimeError(
-        "Registration could not be saved. "
+        "Registration could not be saved after 5 attempts. "
         "Please try again."
     )
 
 
-# =====================================================
-# PHONE VALIDATION
-# =====================================================
-
-def normalize_phone(phone):
-
-    return re.sub(
-        r"[\s()\-]",
-        "",
-        phone.strip()
-    )
-
-
-def valid_phone(phone):
-
-    return bool(
-        re.fullmatch(
-            r"(09|07)\d{8}|\+251(9|7)\d{8}",
-            phone
-        )
-    )
-
-
-# =====================================================
-# LOAD GROUP AND MEMBERS
-# =====================================================
+# ============================================================
+# 8. LOAD CURRENT GROUP INFORMATION
+# ============================================================
 
 try:
-
-    group = get_group()
-
+    settings, _ = get_group_settings()
     members = get_members()
 
 except Exception as error:
-
-    st.error(
-        "GitHub storage connection failed."
-    )
-
-    st.subheader("Technical error")
-
+    st.error("Unable to connect to GitHub storage.")
     st.code(str(error))
-
-    st.info(
-        "Check GitHub token, repository name, "
-        "branch name and repository permissions."
-    )
-
     st.stop()
 
 
-# =====================================================
-# CALCULATE MEMBERSHIP STATUS
-# =====================================================
-
-registered = len(members)
-
-available = max(
-    CAPACITY - registered,
-    0
-)
-
+capacity = 10
+registered_count = len(members)
+remaining = max(capacity - registered_count, 0)
 registration_open = (
-    group["is_open"] and available > 0
+    settings.get("is_open", True)
+    and registered_count < capacity
 )
 
 
-# =====================================================
-# PUBLIC REGISTRATION PAGE
-# =====================================================
+# ============================================================
+# 9. PUBLIC REGISTRATION DASHBOARD
+# ============================================================
 
-st.title("🤝 EGSA DIGITAL EQUB")
+st.divider()
 
-st.caption(
-    "Official EGSA Digital Equb Membership Registration"
-)
-
-st.markdown(
-    f"""
-    <div class="hero">
-        <h2>{group['group_name']}</h2>
-        <h3>ETB 10,000 / Month</h3>
-        <p>Limited membership: Exactly 10 people</p>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-
-
-# =====================================================
-# MEMBERSHIP DASHBOARD
-# =====================================================
+st.subheader("📊 Group Registration Status")
 
 col1, col2, col3 = st.columns(3)
 
 col1.metric(
-    "Registered",
-    f"{registered}/{CAPACITY}"
+    "Registered Members",
+    f"{registered_count}/{capacity}",
 )
 
 col2.metric(
-    "Available",
-    available
+    "Available Positions",
+    remaining,
 )
 
 col3.metric(
-    "Status",
-    "OPEN" if registration_open else "CLOSED"
+    "Monthly Contribution",
+    "ETB 10,000",
 )
 
 st.progress(
-    min(registered / CAPACITY, 1.0)
+    min(registered_count / capacity, 1.0)
 )
 
-st.caption(
-    f"{registered} members registered. "
-    f"{available} positions remaining."
-)
+if registration_open:
+    st.success("Registration is currently OPEN.")
+else:
+    st.error("Registration is CLOSED. All available positions may be filled.")
+
+
+# ============================================================
+# 10. REGISTRATION FORM
+# ============================================================
 
 st.divider()
-
-
-# =====================================================
-# REGISTRATION FORM
-# =====================================================
+st.subheader("📝 Member Registration")
 
 if registration_open:
 
-    st.success("Registration is OPEN")
-
-    st.subheader("Register Your Membership")
-
-    with st.form(
-        "equb_registration",
-        clear_on_submit=True
-    ):
+    with st.form("equb_registration_form"):
 
         full_name = st.text_input(
             "Full Name *",
-            placeholder="Enter your full name"
+            placeholder="Enter your full name",
         )
 
         phone = st.text_input(
             "Mobile Phone Number *",
-            placeholder="0912345678"
+            placeholder="09XXXXXXXX or +2519XXXXXXXX",
         )
 
-        telegram = st.text_input(
+        telegram_username = st.text_input(
             "Telegram Username",
-            placeholder="@username (optional)"
+            placeholder="Enter Telegram username (optional)",
         )
 
-        confirmation = st.checkbox(
-            "I confirm that my information is correct "
-            "and I agree to participate in EGSA Digital Equb."
+        agree = st.checkbox(
+            "I confirm that the information provided is correct."
         )
 
         submitted = st.form_submit_button(
-            "REGISTER NOW",
-            type="primary",
-            use_container_width=True
+            "Register Now",
+            use_container_width=True,
         )
 
     if submitted:
 
-        phone = normalize_phone(phone)
-
-        if not full_name.strip():
-
-            st.error(
-                "Please enter your full name."
-            )
-
-        elif not valid_phone(phone):
-
-            st.error(
-                "Please enter a valid Ethiopian phone number."
-            )
-
-        elif not confirmation:
-
+        if not full_name.strip() or not phone.strip():
             st.warning(
-                "Please confirm your participation."
+                "Please enter your full name and phone number."
+            )
+
+        elif not agree:
+            st.warning(
+                "Please confirm your registration information."
             )
 
         else:
-
             try:
-
                 result = register_member(
-                    full_name.strip(),
+                    full_name,
                     phone,
-                    telegram.strip()
+                    telegram_username,
                 )
 
-                status = result.get("status")
-
-                if status == "registered":
-
+                if result == "registered":
                     st.success(
-                        "Your registration was saved successfully!"
+                        "Registration completed successfully!"
                     )
-
                     st.balloons()
-
-                    st.subheader(
-                        f"Your Member Number: "
-                        f"{result['member_no']}"
-                    )
-
-                    if result["member_no"] == CAPACITY:
-
-                        st.warning(
-                            "All 10 positions are now filled. "
-                            "Registration is closed."
-                        )
-
                     st.rerun()
 
-                elif status == "duplicate":
-
-                    st.warning(
+                elif result == "duplicate":
+                    st.error(
                         "This phone number is already registered."
                     )
 
-                elif status == "full":
-
+                elif result == "full":
                     st.error(
-                        "Registration closed. "
-                        "All 10 positions have been filled."
+                        "Sorry, all 10 member positions are filled."
                     )
+                    st.rerun()
 
-                elif status == "closed":
-
+                elif result == "closed":
                     st.error(
                         "Registration is currently closed."
                     )
 
-                else:
-
+                elif result == "invalid_phone":
                     st.error(
-                        f"Registration unsuccessful: {status}"
+                        "Invalid Ethiopian mobile number. "
+                        "Use 09XXXXXXXX, 07XXXXXXXX, "
+                        "or +2519XXXXXXXX / +2517XXXXXXXX."
+                    )
+
+                elif result == "invalid_name":
+                    st.error(
+                        "Please enter a valid full name."
                     )
 
             except Exception as error:
-
                 st.error(
-                    "Unable to save your registration to GitHub."
+                    "Registration failed. Please try again."
                 )
-
-                st.caption(str(error))
-
-
-# =====================================================
-# CLOSED REGISTRATION MESSAGE
-# =====================================================
+                st.code(str(error))
 
 else:
-
-    st.error("🔒 REGISTRATION CLOSED")
-
-    st.subheader(
-        "All membership positions are unavailable."
-    )
-
-    st.info(
-        "Thank you for your interest in EGSA Digital Equb. "
-        "Please contact the Equb administrator for "
-        "information about future registration."
+    st.warning(
+        "Thank you for your interest. "
+        "Registration for EGSA Digital Equb Group 3 is closed."
     )
 
 
-# =====================================================
-# ADMINISTRATOR DASHBOARD
-# =====================================================
+# ============================================================
+# 11. ADMIN DASHBOARD
+# ============================================================
 
 st.divider()
 
-with st.expander("🔐 Administrator Login"):
+with st.expander("🔐 Admin Dashboard"):
 
-    if not st.session_state.get(
-        "admin_logged_in",
-        False
-    ):
+    st.subheader("Administrator Login")
 
-        password = st.text_input(
-            "Administrator Password",
-            type="password"
+    if not st.session_state.get("admin_logged_in", False):
+
+        admin_password = st.text_input(
+            "Admin Password",
+            type="password",
+            key="admin_password_input",
         )
 
-        if st.button("Login"):
+        if st.button("Login", use_container_width=True):
 
-            if password == st.secrets["ADMIN_PASSWORD"]:
-
+            if admin_password == CONFIG["admin_password"]:
                 st.session_state["admin_logged_in"] = True
-
                 st.rerun()
-
             else:
-
-                st.error(
-                    "Incorrect administrator password."
-                )
+                st.error("Incorrect administrator password.")
 
     else:
 
-        st.success(
-            "Administrator authenticated."
-        )
+        st.success("Administrator authenticated.")
+
+        if st.button("Refresh Member Records"):
+            st.rerun()
 
         try:
-
             admin_members = get_members()
+            admin_settings, _ = get_group_settings()
 
-            st.subheader("Membership Management")
+            st.subheader("Registered Members")
+
+            st.dataframe(
+                admin_members,
+                use_container_width=True,
+                hide_index=True,
+            )
 
             st.metric(
                 "Total Registered Members",
-                f"{len(admin_members)} / {CAPACITY}"
+                len(admin_members),
             )
 
-            if admin_members:
+            # CSV download
+            csv_data = admin_members.to_csv(
+                index=False
+            ).encode("utf-8-sig")
 
-                df = pd.DataFrame(admin_members)
+            st.download_button(
+                "⬇️ Download CSV",
+                data=csv_data,
+                file_name="EGSA_Equb_Members.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
 
-                df = df.rename(
-                    columns={
-                        "member_no": "Member Number",
-                        "full_name": "Full Name",
-                        "phone": "Phone",
-                        "telegram_username": "Telegram Username",
-                        "registered_at": "Registration Date"
-                    }
+            # Excel download
+            excel_buffer = io.BytesIO()
+
+            with pd.ExcelWriter(
+                excel_buffer,
+                engine="openpyxl",
+            ) as writer:
+                admin_members.to_excel(
+                    writer,
+                    index=False,
+                    sheet_name="Equb Members",
                 )
 
-                st.dataframe(
-                    df,
-                    use_container_width=True,
-                    hide_index=True
-                )
+            st.download_button(
+                "⬇️ Download Excel",
+                data=excel_buffer.getvalue(),
+                file_name="EGSA_Equb_Members.xlsx",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                use_container_width=True,
+            )
 
-                # CSV EXPORT
+            st.subheader("Registration Management")
 
-                csv_data = df.to_csv(
-                    index=False
-                ).encode("utf-8-sig")
-
-                st.download_button(
-                    "📥 Download CSV",
-                    data=csv_data,
-                    file_name="EGSA_Equb_Members.csv",
-                    mime="text/csv"
-                )
-
-                # EXCEL EXPORT
-
-                excel_buffer = io.BytesIO()
-
-                with pd.ExcelWriter(
-                    excel_buffer,
-                    engine="openpyxl"
-                ) as writer:
-
-                    df.to_excel(
-                        writer,
-                        index=False,
-                        sheet_name="Members"
-                    )
-
-                st.download_button(
-                    "📊 Download Excel",
-                    data=excel_buffer.getvalue(),
-                    file_name="EGSA_Equb_Members.xlsx",
-                    mime=(
-                        "application/vnd.openxmlformats-officedocument."
-                        "spreadsheetml.sheet"
-                    )
-                )
-
+            if admin_settings.get("is_open", True):
+                st.info("Registration is enabled.")
             else:
+                st.warning("Registration is disabled.")
 
-                st.info(
-                    "No members registered yet."
-                )
-
-            st.divider()
-
-            # REGISTRATION CONTROL
-
-            st.subheader("Registration Control")
-
-            if len(admin_members) >= CAPACITY:
-
-                st.warning(
-                    "The group is full. Registration cannot be reopened "
-                    "unless the membership records are corrected."
-                )
+            can_reopen = len(admin_members) < capacity
 
             allow_registration = st.checkbox(
-                "Enable Registration",
-                value=group["is_open"],
-                disabled=(len(admin_members) >= CAPACITY)
+                "Allow new registrations",
+                value=(
+                    admin_settings.get("is_open", True)
+                    and can_reopen
+                ),
+                disabled=not can_reopen,
             )
 
             if st.button(
-                "Update Registration Status"
+                "Save Registration Settings",
+                use_container_width=True,
             ):
 
-                update_group_status(
-                    allow_registration
-                )
+                if allow_registration and not can_reopen:
+                    st.error(
+                        "The group is full. Registration cannot be reopened."
+                    )
+                else:
+                    try:
+                        admin_settings["is_open"] = (
+                            allow_registration
+                        )
 
-                st.success(
-                    "Registration status updated successfully."
-                )
+                        save_group_settings(admin_settings)
 
-                st.rerun()
+                        st.success(
+                            "Registration settings updated."
+                        )
+                        st.rerun()
+
+                    except Exception as error:
+                        st.error(
+                            "Could not update registration settings."
+                        )
+                        st.code(str(error))
 
         except Exception as error:
-
-            st.error(
-                "Unable to load administrator information."
-            )
-
+            st.error("Could not load admin records.")
             st.code(str(error))
 
         if st.button("Logout"):
-
             st.session_state["admin_logged_in"] = False
-
             st.rerun()
 
 
-# =====================================================
-# FOOTER
-# =====================================================
+# ============================================================
+# 12. FOOTER
+# ============================================================
 
 st.divider()
 
 st.caption(
-    "EGSA Digital Equb | Membership Registration Portal"
+    "EGSA Digital Equb | Group 3 | "
+    "Member Registration Management System"
 )
 
 st.caption(
-    "This application manages registrations only. "
-    "It does not collect or transfer Equb contributions."
+    "This platform is for registration and record management only. "
+    "Monthly contributions are handled separately by the group."
 )
